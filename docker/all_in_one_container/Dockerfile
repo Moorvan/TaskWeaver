@@ -7,6 +7,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Install gcc and python3-dev for building certain Python packages
+RUN apt-get update && apt-get install -y \
+    gcc python3-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 RUN useradd -m taskweaver
 RUN chown taskweaver:taskweaver /app

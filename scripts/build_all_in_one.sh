@@ -2,7 +2,7 @@
 
 # Usage: ./script.sh --with-web-search=true
 # Default value for with web search option
-WithWebSearch=false
+WithWebSearch=true
 
 for i in "$@"
 do
