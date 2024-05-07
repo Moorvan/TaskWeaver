@@ -144,9 +144,13 @@ class Environment:
             except docker.errors.DockerException as e:
                 raise docker.errors.DockerException(f"Failed to connect to Docker daemon: {e}. ")
 
-            self.image_name = "taskweavercontainers/taskweaver-executor"
+            self.image_name = "taskweavercontainers/taskweaver-executor:latest"
             try:
-                self.docker_client.images.get(self.image_name)
+                local_image = self.docker_client.images.get(self.image_name)
+                registry_image = self.docker_client.images.get_registry_data(self.image_name)
+                if local_image.id != registry_image.id:
+                    logger.info(f"Local image {local_image.id} does not match registry image {registry_image.id}.")
+                    raise docker.errors.ImageNotFound("Local image is outdated.")
             except docker.errors.ImageNotFound:
                 logger.info("Pulling image from docker.io.")
                 try:
@@ -219,22 +223,24 @@ class Environment:
             self._cmd_session_init(session)
             session.kernel_status = "ready"
         elif self.mode == EnvMode.Container:
-            if platform.system() != "Windows":
-                # change the permission of the ces and cwd directories
-                os.chmod(ces_session_dir, 0o755)
-                os.chmod(cwd, 0o755)
-
             connection_file = self._get_connection_file(session_id, new_kernel_id)
             new_port_start = self.port_start_inside_container
             kernel_env = {
                 "TASKWEAVER_KERNEL_MODE": "container",
                 "TASKWEAVER_SESSION_ID": session_id,
                 "TASKWEAVER_KERNEL_ID": new_kernel_id,
+                "TASKWEAVER_SESSION_DIR": "/app/",
                 "TASKWEAVER_CES_DIR": "/app/ces/",
                 "TASKWEAVER_CWD": "/app/cwd/",
                 "TASKWEAVER_PORT_START": str(new_port_start),
                 "TASKWEAVER_LOGGING_FILE_PATH": "/app/ces/kernel_logging.log",
             }
+
+            if platform.system() != "Windows":
+                # change the permission of the ces and cwd directories
+                kernel_env["TASKWEAVER_UID"] = str(os.getuid())
+                kernel_env["TASKWEAVER_GID"] = str(os.getgid())
+
             # ports will be assigned automatically at the host
             container = self.docker_client.containers.run(
                 image=self.image_name,
@@ -251,19 +257,18 @@ class Environment:
                     f"{new_port_start + 3}/tcp": None,
                     f"{new_port_start + 4}/tcp": None,
                 },
-                user="taskweaver",
             )
 
             tick = 0
-            while tick < 10:
+            while tick < 30:
                 container.reload()
                 if container.status == "running" and os.path.isfile(connection_file):
                     logger.info("Container is running and connection file is ready.")
                     break
                 time.sleep(1)  # wait for 1 second before checking again
                 tick += 1
-            if tick == 10:
-                raise Exception("Container is not ready after 10 seconds")
+            if tick == 30:
+                raise Exception("Container is not ready after 30 seconds")
 
             # save the ports to ces session dir
             port_bindings = container.attrs["NetworkSettings"]["Ports"]
@@ -300,8 +305,6 @@ class Environment:
     ) -> ExecutionResult:
         exec_id = get_id(prefix="exec") if exec_id is None else exec_id
         session = self._get_session(session_id)
-        if session.kernel_status == "pending":
-            self.start_session(session_id)
 
         session.execution_count += 1
         execution_index = session.execution_count
@@ -309,6 +312,10 @@ class Environment:
             session.session_id,
             f"%_taskweaver_exec_pre_check {execution_index} {exec_id}",
         )
+        # update session variables before executing the code
+        if session.session_var:
+            self._update_session_var(session)
+        # execute the code on the kernel
         exec_result = self._execute_code_on_kernel(
             session.session_id,
             exec_id=exec_id,
@@ -375,7 +382,6 @@ class Environment:
     ) -> None:
         session = self._get_session(session_id)
         session.session_var.update(session_var)
-        self._update_session_var(session)
 
     def stop_session(self, session_id: str) -> None:
         session = self._get_session(session_id)
